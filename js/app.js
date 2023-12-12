@@ -1,126 +1,197 @@
-/*global Vue, todoStorage */
-
-(function (exports) {
-
+/*global jQuery, Handlebars, Router */
+jQuery(function ($) {
 	'use strict';
 
-	var filters = {
-		all: function (todos) {
-			return todos;
+	Handlebars.registerHelper('eq', function (a, b, options) {
+		return a === b ? options.fn(this) : options.inverse(this);
+	});
+
+	var ENTER_KEY = 13;
+	var ESCAPE_KEY = 27;
+
+	var util = {
+		uuid: function () {
+			/*jshint bitwise:false */
+			var i, random;
+			var uuid = '';
+
+			for (i = 0; i < 32; i++) {
+				random = Math.random() * 16 | 0;
+				if (i === 8 || i === 12 || i === 16 || i === 20) {
+					uuid += '-';
+				}
+				uuid += (i === 12 ? 4 : (i === 16 ? (random & 3 | 8) : random)).toString(16);
+			}
+
+			return uuid;
 		},
-		active: function (todos) {
-			return todos.filter(function (todo) {
-				return !todo.completed;
-			});
+		pluralize: function (count, word) {
+			return count === 1 ? word : word + 's';
 		},
-		completed: function (todos) {
-			return todos.filter(function (todo) {
-				return todo.completed;
-			});
+		store: function (namespace, data) {
+			if (arguments.length > 1) {
+				return localStorage.setItem(namespace, JSON.stringify(data));
+			} else {
+				var store = localStorage.getItem(namespace);
+				return (store && JSON.parse(store)) || [];
+			}
 		}
 	};
 
-	exports.app = new Vue({
+	var App = {
+		init: function () {
+			this.todos = util.store('todos-jquery');
+			this.todoTemplate = Handlebars.compile($('#todo-template').html());
+			this.footerTemplate = Handlebars.compile($('#footer-template').html());
+			this.bindEvents();
 
-		// the root element that will be compiled
-		el: '.todoapp',
-
-		// app initial state
-		data: {
-			todos: todoStorage.fetch(),
-			newTodo: '',
-			editedTodo: null,
-			visibility: 'all'
+			new Router({
+				'/:filter': function (filter) {
+					this.filter = filter;
+					this.render();
+				}.bind(this)
+			}).init('/all');
 		},
+		bindEvents: function () {
+			$('.new-todo').on('keyup', this.create.bind(this));
+			$('.toggle-all').on('change', this.toggleAll.bind(this));
+			$('.footer').on('click', '.clear-completed', this.destroyCompleted.bind(this));
+			$('.todo-list')
+				.on('change', '.toggle', this.toggle.bind(this))
+				.on('dblclick', 'label', this.editingMode.bind(this))
+				.on('keyup', '.edit', this.editKeyup.bind(this))
+				.on('focusout', '.edit', this.update.bind(this))
+				.on('click', '.destroy', this.destroy.bind(this));
+		},
+		render: function () {
+			var todos = this.getFilteredTodos();
+			$('.todo-list').html(this.todoTemplate(todos));
+			$('.main').toggle(todos.length > 0);
+			$('.toggle-all').prop('checked', this.getActiveTodos().length === 0);
+			this.renderFooter();
+			$('.new-todo').focus();
+			util.store('todos-jquery', this.todos);
+		},
+		renderFooter: function () {
+			var todoCount = this.todos.length;
+			var activeTodoCount = this.getActiveTodos().length;
+			var template = this.footerTemplate({
+				activeTodoCount: activeTodoCount,
+				activeTodoWord: util.pluralize(activeTodoCount, 'item'),
+				completedTodos: todoCount - activeTodoCount,
+				filter: this.filter
+			});
 
-		// watch todos change for localStorage persistence
-		watch: {
-			todos: {
-				deep: true,
-				handler: todoStorage.save
+			$('.footer').toggle(todoCount > 0).html(template);
+		},
+		toggleAll: function (e) {
+			var isChecked = $(e.target).prop('checked');
+
+			this.todos.forEach(function (todo) {
+				todo.completed = isChecked;
+			});
+
+			this.render();
+		},
+		getActiveTodos: function () {
+			return this.todos.filter(function (todo) {
+				return !todo.completed;
+			});
+		},
+		getCompletedTodos: function () {
+			return this.todos.filter(function (todo) {
+				return todo.completed;
+			});
+		},
+		getFilteredTodos: function () {
+			if (this.filter === 'active') {
+				return this.getActiveTodos();
+			}
+
+			if (this.filter === 'completed') {
+				return this.getCompletedTodos();
+			}
+
+			return this.todos;
+		},
+		destroyCompleted: function () {
+			this.todos = this.getActiveTodos();
+			this.render();
+		},
+		// accepts an element from inside the `.item` div and
+		// returns the corresponding index in the `todos` array
+		getIndexFromEl: function (el) {
+			var id = $(el).closest('li').data('id');
+			var todos = this.todos;
+			var i = todos.length;
+
+			while (i--) {
+				if (todos[i].id === id) {
+					return i;
+				}
 			}
 		},
+		create: function (e) {
+			var $input = $(e.target);
+			var val = $input.val().trim();
 
-		// computed properties
-		// http://vuejs.org/guide/computed.html
-		computed: {
-			filteredTodos: function () {
-				return filters[this.visibility](this.todos);
-			},
-			remaining: function () {
-				return filters.active(this.todos).length;
-			},
-			allDone: {
-				get: function () {
-					return this.remaining === 0;
-				},
-				set: function (value) {
-					this.todos.forEach(function (todo) {
-						todo.completed = value;
-					});
-				}
+			if (e.which !== ENTER_KEY || !val) {
+				return;
+			}
+
+			this.todos.push({
+				id: util.uuid(),
+				title: val,
+				completed: false
+			});
+
+			$input.val('');
+
+			this.render();
+		},
+		toggle: function (e) {
+			var i = this.getIndexFromEl(e.target);
+			this.todos[i].completed = !this.todos[i].completed;
+			this.render();
+		},
+		editingMode: function (e) {
+			var $input = $(e.target).closest('li').addClass('editing').find('.edit');
+			// puts caret at end of input
+			var tmpStr = $input.val();
+			$input.val('');
+			$input.val(tmpStr);
+			$input.focus();
+		},
+		editKeyup: function (e) {
+			if (e.which === ENTER_KEY) {
+				e.target.blur();
+			}
+
+			if (e.which === ESCAPE_KEY) {
+				$(e.target).data('abort', true).blur();
 			}
 		},
-
-		// methods that implement data logic.
-		// note there's no DOM manipulation here at all.
-		methods: {
-
-			pluralize: function (word, count) {
-				return word + (count === 1 ? '' : 's');
-			},
-
-			addTodo: function () {
-				var value = this.newTodo && this.newTodo.trim();
-				if (!value) {
-					return;
-				}
-				// TODO: Use a proper UUID instead of `Date.now()`.
-				this.todos.push({ id: Date.now(), title: value, completed: false });
-				this.newTodo = '';
-			},
-
-			removeTodo: function (todo) {
-				var index = this.todos.indexOf(todo);
-				this.todos.splice(index, 1);
-			},
-
-			editTodo: function (todo) {
-				this.beforeEditCache = todo.title;
-				this.editedTodo = todo;
-			},
-
-			doneEdit: function (todo) {
-				if (!this.editedTodo) {
-					return;
-				}
-				this.editedTodo = null;
-				todo.title = todo.title.trim();
-				if (!todo.title) {
-					this.removeTodo(todo);
-				}
-			},
-
-			cancelEdit: function (todo) {
-				this.editedTodo = null;
-				todo.title = this.beforeEditCache;
-			},
-
-			removeCompleted: function () {
-				this.todos = filters.active(this.todos);
+		update: function (e) {
+			var el = e.target;
+			var $el = $(el);
+			var val = $el.val().trim();
+			
+			if ($el.data('abort')) {
+				$el.data('abort', false);
+			} else if (!val) {
+				this.destroy(e);
+				return;
+			} else {
+				this.todos[this.getIndexFromEl(el)].title = val;
 			}
+
+			this.render();
 		},
-
-		// a custom directive to wait for the DOM to be updated
-		// before focusing on the input field.
-		// http://vuejs.org/guide/custom-directive.html
-		directives: {
-			'todo-focus': function (el, binding) {
-				if (binding.value) {
-					el.focus();
-				}
-			}
+		destroy: function (e) {
+			this.todos.splice(this.getIndexFromEl(e.target), 1);
+			this.render();
 		}
-	});
+	};
 
-})(window);
+	App.init();
+});
